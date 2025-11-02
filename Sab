@@ -1,83 +1,156 @@
--- MuteEverything.lua
--- Chạy bằng executor (Synapse/Fluxus/krnl...) hoặc LocalScript trong StarterPlayerScripts.
--- Khi chạy: sẽ đặt Volume = 0 cho mọi Sound, Stop() chúng, và mute cả SoundGroup nếu có.
--- Ngoài ra theo dõi các âm mới được tạo và mute luôn.
+-- FriendlyMute.lua
+-- Mute tất cả Sound (client-only) theo cách "thân thiện" khi chạy chung với script khác.
+-- Không dùng vòng lặp nặng; dùng GetPropertyChangedSignal & DescendantAdded.
+-- Chạy bằng executor (Synapse/Fluxus/...) hoặc LocalScript.
 
-local function tryMuteSound(sound)
-    if not sound or not sound.Parent then return end
-    if not sound:IsA("Sound") then return end
-    pcall(function()
-        sound.Volume = 0                 -- đặt bằng 0
-        if sound.Playing then
-            sound:Stop()                 -- dừng nếu đang phát
-        end
-    end)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+-- ==== CÀI ĐẶT (chỉnh nếu cần) ====
+local MUTE_GUI_SOUNDS = true    -- true = tắt cả, false = giữ âm trong PlayerGui
+local WHITELIST_NAMES = {       -- nếu muốn cho phép âm thanh có tên cụ thể (ví dụ "Click"), thêm tên vào đây
+	-- "Click",
+}
+-- =================================
+
+local weak = { __mode = "k" }
+local tracked = setmetatable({}, weak) -- [sound] = {connVolume, connPlaying, connAncestry}
+
+local function isWhitelisted(sound)
+	if not sound or not sound.Name then return false end
+	for _, name in ipairs(WHITELIST_NAMES) do
+		if sound.Name == name then return true end
+	end
+	return false
 end
 
-local function tryMuteSoundGroup(group)
-    if not group or not group.Parent then return end
-    -- Một số API/structure khác nhau giữa các game, pcall cho an toàn
-    pcall(function()
-        if group.Volume ~= nil then
-            group.Volume = 0
-        end
-    end)
+local function isGuiDescendant(inst)
+	if not player or not player:FindFirstChild("PlayerGui") then return false end
+	return inst:IsDescendantOf(player.PlayerGui)
 end
 
--- Hàm chính: duyệt hiện tại
-local function muteAllNow()
-    for _, obj in ipairs(game:GetDescendants()) do
-        if obj:IsA("Sound") then
-            tryMuteSound(obj)
-        elseif obj.ClassName == "SoundGroup" or obj:IsA("Folder") and obj.Name:lower():find("soundgroup") then
-            tryMuteSoundGroup(obj)
-        end
-    end
-
-    -- Nếu game dùng SoundService để chứa SoundGroups, xử lý thêm
-    pcall(function()
-        local ss = game:GetService("SoundService")
-        for _, child in ipairs(ss:GetChildren()) do
-            if child.ClassName == "SoundGroup" then
-                tryMuteSoundGroup(child)
-            end
-        end
-    end)
+local function safeSetVolumeZero(sound)
+	pcall(function()
+		-- Một số object có Volume read-only trong vài môi trường, pcall để an toàn
+		if sound.Volume ~= 0 then
+			sound.Volume = 0
+		end
+		-- dừng nếu đang phát
+		if sound.Playing then
+			-- pcall để tránh lỗi nếu method bị override
+			pcall(function() sound:Stop() end)
+		end
+	end)
 end
 
--- Lắng nghe âm mới xuất hiện
+local function untrackSound(sound)
+	local info = tracked[sound]
+	if info then
+		pcall(function()
+			if info.connVolume then info.connVolume:Disconnect() end
+			if info.connPlaying then info.connPlaying:Disconnect() end
+			if info.connAncestry then info.connAncestry:Disconnect() end
+		end)
+		tracked[sound] = nil
+	end
+end
+
+local function trackSound(sound)
+	if not sound or not sound:IsA("Sound") then return end
+	if tracked[sound] then return end
+	-- nếu whitelist, bỏ qua
+	if isWhitelisted(sound) then return end
+	-- nếu là GUI sound mà bạn muốn giữ, bỏ qua
+	if (not MUTE_GUI_SOUNDS) and isGuiDescendant(sound) then return end
+
+	-- mute ngay
+	safeSetVolumeZero(sound)
+
+	-- theo dõi khi Volume bị chỉnh
+	local ok, connVolume = pcall(function()
+		return sound:GetPropertyChangedSignal("Volume"):Connect(function()
+			-- reset về 0 nếu ai đó thay đổi volume
+			if sound and sound.Parent then
+				-- nhỏ debounce: nếu volume vừa set thành 0 thì thôi
+				pcall(function()
+					if sound.Volume ~= 0 then
+						sound.Volume = 0
+					end
+				end)
+			end
+		end)
+	end)
+	if not ok then connVolume = nil end
+
+	-- theo dõi khi Playing thay đổi (nếu bật Playing thì ngay lập tức stop)
+	local ok2, connPlaying = pcall(function()
+		return sound:GetPropertyChangedSignal("Playing"):Connect(function()
+			if sound and sound.Parent then
+				pcall(function()
+					if sound.Playing then
+						sound:Stop()
+					end
+				end)
+			end
+		end)
+	end)
+	if not ok2 then connPlaying = nil end
+
+	-- dọn khi sound bị remove khỏi game
+	local ok3, connAncestry = pcall(function()
+		return sound.AncestryChanged:Connect(function()
+			-- nếu sound không còn descendant của game, dọn kết nối
+			if not sound:IsDescendantOf(game) then
+				untrackSound(sound)
+			end
+		end)
+	end)
+	if not ok3 then connAncestry = nil end
+
+	tracked[sound] = {connVolume = connVolume, connPlaying = connPlaying, connAncestry = connAncestry}
+end
+
+-- xử lý tất cả sound hiện có lần đầu
+for _, obj in ipairs(game:GetDescendants()) do
+	if obj:IsA("Sound") then
+		trackSound(obj)
+	end
+end
+
+-- khi object mới xuất hiện, track nếu là Sound hoặc chứa Sound
 game.DescendantAdded:Connect(function(desc)
-    -- chờ 0 frame để đảm bảo thuộc tính sẵn
-    task.defer(function()
-        if desc:IsA("Sound") then
-            tryMuteSound(desc)
-        elseif desc.ClassName == "SoundGroup" then
-            tryMuteSoundGroup(desc)
-        end
+	-- dùng task.defer để không block quá trình tạo đối tượng
+	task.defer(function()
+		if not desc or not desc.Parent then return end
 
-        -- Một số game tạo các container chứa Sounds sau khi tạo,
-        -- nên nếu một folder mới chứa Sounds thì lặp qua children của nó
-        if #desc:GetChildren() > 0 then
-            for _, child in ipairs(desc:GetChildren()) do
-                if child:IsA("Sound") then
-                    tryMuteSound(child)
-                elseif child.ClassName == "SoundGroup" then
-                    tryMuteSoundGroup(child)
-                end
-            end
-        end
-    end)
+		if desc:IsA("Sound") then
+			trackSound(desc)
+			return
+		end
+
+		-- nếu là folder/container, duyệt con để tìm Sound mới
+		for _, c in ipairs(desc:GetChildren()) do
+			if c:IsA("Sound") then
+				trackSound(c)
+			end
+		end
+	end)
 end)
 
--- Thực hiện ngay
-muteAllNow()
-
--- Thêm backup loop: mỗi vài giây chạy lại để đảm bảo game không reset âm trở lại
+-- Backup nhẹ: quét lại thỉnh thoảng, nhưng rất thưa để tránh xung đột với script khác
 task.spawn(function()
-    while true do
-        task.wait(2) -- 2 giây (có thể chỉnh về 1 nếu muốn gắt hơn)
-        muteAllNow()
-    end
+	while true do
+		task.wait(8) -- chạy mỗi 8 giây (nhẹ nhàng với hệ thống)
+		for s, _ in pairs(tracked) do
+			if s and s.Parent then
+				safeSetVolumeZero(s)
+			else
+				untrackSound(s)
+			end
+		end
+	end
 end)
 
-print("✅ MuteEverything: Đã đặt volume mọi Sound = 0 và dừng các âm đang phát (chỉ client).")
+print("FriendlyMute: đang chạy — sẽ tắt mọi Sound trên client (theo cài đặt).")
+
