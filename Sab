@@ -1,0 +1,34 @@
+-- LocalScript (đặt vào StarterPlayer -> StarterPlayerScripts)
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+-- Kiểm tra xem âm thanh có nằm trong GUI không
+local function isGuiSound(sound)
+	if not player:FindFirstChild("PlayerGui") then return false end
+	return sound:IsDescendantOf(player.PlayerGui)
+end
+
+-- Hàm tắt âm thanh (trừ GUI)
+local function muteAllSounds()
+	for _, obj in ipairs(game:GetDescendants()) do
+		if obj:IsA("Sound") then
+			if not isGuiSound(obj) then
+				pcall(function()
+					obj.Volume = 0
+					obj:Stop()
+				end)
+			end
+		end
+	end
+end
+
+-- Chạy ngay khi bật script
+muteAllSounds()
+
+-- Liên tục kiểm tra mỗi 2 giây để tắt các âm thanh mới sinh ra
+task.spawn(function()
+	while task.wait(2) do
+		muteAllSounds()
+	end
+end)
