@@ -6,12 +6,6 @@
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local player = Players.LocalPlayer
-
--- ==== CÀI ĐẶT (chỉnh nếu cần) ====
-local MUTE_GUI_SOUNDS = true    -- true = tắt cả, false = giữ âm trong PlayerGui
-local WHITELIST_NAMES = {       -- nếu muốn cho phép âm thanh có tên cụ thể (ví dụ "Click"), thêm tên vào đây
-	-- "Click",
-}
 -- =================================
 
 local weak = { __mode = "k" }
